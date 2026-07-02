@@ -1,0 +1,28 @@
+{
+  "name": "verity",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Verity — a Verisphere truth-staking overlay for Wikipedia.",
+  "scripts": {
+    "dev": "node scripts/run.mjs dev",
+    "build": "tsc --noEmit && node scripts/run.mjs build",
+    "build:prod": "tsc --noEmit && node scripts/run.mjs build --env production",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "compromise": "^14.15.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.7.0",
+    "@types/chrome": "^0.2.1",
+    "@types/node": "^26.1.0",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21"
+  }
+}
