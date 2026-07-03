@@ -1,0 +1,12 @@
+node_modules/
+dist/
+
+# Local/secret env overrides. The committed per-env config (.env.dev,
+# .env.production) holds only non-secret VITE_ URLs and is intentionally kept.
+.env
+.env.local
+.env.*.local
+*.local
+
+*.log
+.DS_Store
