@@ -11,4 +11,9 @@ export const env = {
   appApiBase: import.meta.env.VITE_APP_API_BASE ?? "http://localhost:8070/api",
   /** verity-api: chain-independent atomicity/decomposition service. */
   verityApiUrl: import.meta.env.VITE_VERITY_API_URL ?? "http://localhost:8790",
+  /**
+   * Data adapter for claim reads/writes: "mock" (self-contained demo) or "http"
+   * (real app backend). Validation checks are always live regardless.
+   */
+  apiMode: (import.meta.env.VITE_API_MODE ?? "mock") as "mock" | "http",
 } as const;

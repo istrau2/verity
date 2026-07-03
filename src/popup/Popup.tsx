@@ -1,15 +1,14 @@
 import { useEffect, useState } from "react";
 import { tokens } from "../shared/tokens";
-import { fmtVsp, shortAddr } from "../shared/format";
-import { useWallet } from "../wallet/useWallet";
 
 /**
- * Toolbar popup: wallet connect + a global on/off toggle for the overlay.
- * The on/off state is persisted to chrome.storage and read by the content
- * script (wiring left as a follow-up; the toggle is functional in storage).
+ * Toolbar popup: a global on/off switch for the overlay.
+ *
+ * No wallet connect here — an injected wallet (window.ethereum) only exists on
+ * the page, not in this popup context, so connecting happens from the side
+ * panel on the article. Toggling reloads the active tab so it takes effect.
  */
 export function Popup() {
-  const { connected, address, balance, connect, disconnect } = useWallet();
   const [enabled, setEnabled] = useState(true);
 
   useEffect(() => {
@@ -18,10 +17,17 @@ export function Popup() {
     });
   }, []);
 
-  function toggle() {
+  async function toggle() {
     const next = !enabled;
     setEnabled(next);
-    chrome.storage?.local.set({ enabled: next });
+    try {
+      await chrome.storage.local.set({ enabled: next });
+      // Apply immediately: the content script reads `enabled` on page load.
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id) chrome.tabs.reload(tab.id);
+    } catch {
+      /* the setting still persists; it applies on next page load */
+    }
   }
 
   return (
@@ -33,30 +39,21 @@ export function Popup() {
 
       <div style={{ padding: 16 }}>
         <Row label="Overlay">
-          <button onClick={toggle} style={{ ...toggleBtn, background: enabled ? tokens.support : tokens.line, color: enabled ? "#fff" : tokens.muted }}>
+          <button
+            onClick={toggle}
+            style={{ ...toggleBtn, background: enabled ? tokens.support : tokens.line, color: enabled ? "#fff" : tokens.muted }}
+          >
             {enabled ? "On" : "Off"}
           </button>
         </Row>
 
-        <Row label="Wallet">
-          {connected ? (
-            <button onClick={() => disconnect()} style={pill}>{shortAddr(address)}</button>
-          ) : (
-            <button onClick={() => connect()} style={{ ...pill, background: tokens.brand, color: "#fff", border: "none" }}>
-              Connect
-            </button>
-          )}
-        </Row>
-
-        {connected && (
-          <Row label="Balance">
-            <span style={{ fontWeight: 700 }}>{fmtVsp(balance)} VSP</span>
-          </Row>
-        )}
-
         <div style={{ marginTop: 14, fontSize: 12, color: tokens.muted, lineHeight: 1.5 }}>
           Open any Wikipedia article — claims are highlighted by their on-chain
-          Verity Score. Hover to preview, click to stake or create.
+          Verity Score. Hover to preview; click a claim or select text to stake
+          or create. <b>Connect your wallet from the side panel</b> on the page.
+        </div>
+        <div style={{ marginTop: 8, fontSize: 11, color: tokens.faint }}>
+          Toggling the overlay reloads the current tab.
         </div>
       </div>
     </div>
@@ -72,16 +69,6 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-const pill: React.CSSProperties = {
-  padding: "5px 12px",
-  borderRadius: 999,
-  border: `1px solid ${tokens.line}`,
-  background: tokens.surface,
-  fontSize: 13,
-  fontWeight: 600,
-  cursor: "pointer",
-  color: tokens.ink,
-};
 const toggleBtn: React.CSSProperties = {
   padding: "5px 16px",
   borderRadius: 999,

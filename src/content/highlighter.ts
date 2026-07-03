@@ -19,17 +19,11 @@ export function injectMarkStyles() {
     .vr-mark {
       cursor: pointer;
       border-bottom: 2px solid var(--vr-color, ${tokens.brand});
-      background: linear-gradient(transparent 60%, var(--vr-tint, rgba(79,70,229,0.10)) 0);
-      transition: background 0.12s ease;
     }
-    .vr-mark:hover { background: var(--vr-tint, rgba(79,70,229,0.18)); }
-    .vr-mark--low { border-bottom-style: dashed; opacity: 0.9; }
+    .vr-mark--hover { background-color: rgba(79,70,229,0.12); border-radius: 2px; }
+    .vr-mark--low { border-bottom-style: dashed; }
     .vr-mark--diverged { border-bottom-color: #d97706; border-bottom-style: dotted; }
-    .vr-mark--eligible {
-      border-bottom: 1px dashed ${tokens.faint};
-      background: none;
-    }
-    .vr-mark--eligible:hover { background: rgba(79,70,229,0.10); }
+    .vr-mark--eligible { border-bottom: 1px dashed ${tokens.faint}; }
     .vr-badge {
       font: 600 10px ${tokens.font};
       vertical-align: super;
@@ -118,17 +112,41 @@ function wrapRange(rec: SentenceRecord) {
   }
 }
 
+// Shade every fragment of the hovered sentence together (a claim can be split
+// into multiple marks around links, so CSS :hover alone isn't enough).
+let hoverEls: Element[] = [];
+function setHover(id: string | null) {
+  for (const el of hoverEls) el.classList.remove("vr-mark--hover");
+  hoverEls = [];
+  if (id) {
+    hoverEls = Array.from(document.querySelectorAll(`[${MARK_ATTR}="${cssEscape(id)}"]`));
+    for (const el of hoverEls) el.classList.add("vr-mark--hover");
+  }
+}
+
 let wired = false;
 function wireEvents() {
   if (wired) return;
   wired = true;
   document.addEventListener("mouseover", (e) => {
     const mark = (e.target as HTMLElement)?.closest?.(`[${MARK_ATTR}]`);
-    if (mark) emit("hover", { sentenceId: mark.getAttribute(MARK_ATTR)! });
+    if (!mark) return;
+    const id = mark.getAttribute(MARK_ATTR)!;
+    setHover(id);
+    emit("hover", { sentenceId: id });
   });
   document.addEventListener("mouseout", (e) => {
     const mark = (e.target as HTMLElement)?.closest?.(`[${MARK_ATTR}]`);
-    if (mark) emit("hoverEnd", {});
+    if (!mark) return;
+    const id = mark.getAttribute(MARK_ATTR)!;
+    // Keep the shade while moving between fragments of the same sentence.
+    const toMark = (e as MouseEvent).relatedTarget instanceof Element
+      ? ((e as MouseEvent).relatedTarget as Element).closest(`[${MARK_ATTR}]`)
+      : null;
+    if (!toMark || toMark.getAttribute(MARK_ATTR) !== id) {
+      setHover(null);
+      emit("hoverEnd", {});
+    }
   });
   document.addEventListener("click", (e) => {
     const mark = (e.target as HTMLElement)?.closest?.(`[${MARK_ATTR}]`);

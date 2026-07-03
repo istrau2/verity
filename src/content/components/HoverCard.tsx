@@ -3,10 +3,15 @@ import { fmtVsp } from "../../shared/format";
 import type { SentenceRecord } from "../store";
 import { VSChip } from "./VS";
 
+const CARD_WIDTH = 360;
+const PANEL_WIDTH = 380;
+
 /** Lightweight popover shown when hovering a claim mark. */
-export function HoverCard({ rec, rect }: { rec: SentenceRecord; rect: DOMRect }) {
+export function HoverCard({ rec, rect, panelOpen = false }: { rec: SentenceRecord; rect: DOMRect; panelOpen?: boolean }) {
   const top = rect.bottom + 8;
-  const left = Math.min(rect.left, window.innerWidth - 380);
+  // Keep the card clear of the side panel when it's open.
+  const rightBound = window.innerWidth - (panelOpen ? PANEL_WIDTH : 0) - 8;
+  const left = Math.max(8, Math.min(rect.left, rightBound - CARD_WIDTH));
   const c = rec.claim;
 
   return (
@@ -14,8 +19,8 @@ export function HoverCard({ rec, rect }: { rec: SentenceRecord; rect: DOMRect })
       style={{
         position: "fixed",
         top,
-        left: Math.max(8, left),
-        width: 360,
+        left,
+        width: CARD_WIDTH,
         background: tokens.surface,
         border: `1px solid ${tokens.line}`,
         borderRadius: tokens.radius,

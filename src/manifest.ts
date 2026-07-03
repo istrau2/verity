@@ -20,6 +20,13 @@ export default defineManifest({
       js: ["src/content/index.tsx"],
       run_at: "document_idle",
     },
+    {
+      // MAIN-world bridge to the page's injected wallet (window.ethereum).
+      matches: ["*://*.wikipedia.org/wiki/*"],
+      js: ["src/inpage/index.ts"],
+      run_at: "document_start",
+      world: "MAIN",
+    },
   ],
   // Pages the overlay runs on, plus the backends it calls (app API + verity-api).
   // Includes both local dev and prod hosts so a single build works per env;

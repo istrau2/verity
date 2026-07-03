@@ -112,8 +112,10 @@ export function ClaimValidator({
     setPhase("submitting");
     setErr(null);
     try {
-      if (!connected || !address) await connect();
-      const addr = address ?? (await connect()).address!;
+      // Use the address connect() RETURNS — `address` is stale right after connect.
+      let addr = address;
+      if (!addr) addr = (await connect()).address;
+      if (!addr) throw new Error("Connect your wallet to create.");
       const { claim } = await api.createClaim(canonical, signer, addr);
       onResolved(claim);
     } catch (e: any) {

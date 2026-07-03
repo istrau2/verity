@@ -45,7 +45,14 @@ export async function moderateClaim(
     body: JSON.stringify({ text }),
   });
   if (!res.ok || !res.json) return { ok: false, error: res.error ?? `app ${res.status}` };
-  return { ok: true, allowed: res.json.allowed !== false, reason: res.json.reason };
+  const allowed = res.json.allowed !== false;
+  // The app fails CLOSED when the moderation LLM is down (allowed=false +
+  // "unavailable" reason). Treat that as a soft "couldn't verify" (warn), not a
+  // hard block — the relay still fail-closes server-side on submit.
+  if (!allowed && /unavailable/i.test(res.json.reason ?? "")) {
+    return { ok: false, error: "Moderation temporarily unavailable" };
+  }
+  return { ok: true, allowed, reason: res.json.reason };
 }
 
 export interface DedupResult {

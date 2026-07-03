@@ -32,8 +32,11 @@ export function StakeWidget({ claim, onUpdated }: { claim: Claim; onUpdated: (c:
     setBusy(true);
     setErr(null);
     try {
-      if (!connected || !address) await connect();
-      const addr = wallet_address(address);
+      // Use the address connect() RETURNS — the `address` closure var is stale
+      // right after connecting (state updates don't update locals).
+      let addr = address;
+      if (!addr) addr = (await connect()).address;
+      if (!addr) throw new Error("Connect your wallet to stake.");
       const updated = await api.setStake(claim.postId, targetVal, signer, addr);
       onUpdated(updated);
     } catch (e: any) {
@@ -80,11 +83,6 @@ export function StakeWidget({ claim, onUpdated }: { claim: Claim; onUpdated: (c:
       )}
     </div>
   );
-}
-
-function wallet_address(a: string | null): string {
-  if (!a) throw new Error("Wallet not connected");
-  return a;
 }
 
 const stepBtn: React.CSSProperties = {

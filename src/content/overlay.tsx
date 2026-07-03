@@ -75,7 +75,12 @@ export function Overlay() {
       return { text, rect };
     };
     const onChange = () => setSel(panelId ? null : qualify());
-    const onFinalize = () => {
+    const onFinalize = (e: Event) => {
+      // Ignore interactions inside our own UI (e.g. clicking Connect / buttons
+      // in the side panel) — otherwise a leftover page selection would spawn a
+      // new create panel on every click.
+      const host = document.getElementById("verity-root");
+      if (host && e.target && host.contains(e.target as Node)) return;
       const q = qualify();
       if (!q) return;
       if (panelId) openCreate(q.text); // panel open → go straight to create view
@@ -142,8 +147,8 @@ export function Overlay() {
         }}
       />
 
-      {hoverRec && hoverRect && !panelId && (
-        <HoverCard rec={hoverRec} rect={hoverRect} />
+      {hoverRec && hoverRect && (
+        <HoverCard rec={hoverRec} rect={hoverRect} panelOpen={!!panelId} />
       )}
 
       {sel && !panelId && (

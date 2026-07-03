@@ -1,4 +1,4 @@
-import type { VerityAPI, TypedDataSigner } from "./contract";
+import type { VerityAPI } from "./contract";
 import type {
   Claim,
   Edge,
@@ -104,10 +104,14 @@ export const mockApi: VerityAPI = {
     );
   },
 
-  async setStake(postId, targetVsp, signer: TypedDataSigner, address) {
-    await signer.signTypedData({ kind: "ForwardRequest", postId, targetVsp });
-    const c = store.get(postId);
-    if (!c) throw new Error("claim not found");
+  async setStake(postId, targetVsp, _signer, address) {
+    // Demo write: no signature needed. Materialize a placeholder if the claim
+    // came from the real backend (http mode) and isn't in the mock store.
+    let c = store.get(postId);
+    if (!c) {
+      c = { postId, text: "", evs: 0, baseVs: 0, supportStake: 0, challengeStake: 0, totalStake: 0, active: false, incomingCount: 0, outgoingCount: 0 };
+      store.set(postId, c);
+    }
     userStakes.set(`${address}:${postId}`, {
       postId,
       userSupport: targetVsp > 0 ? targetVsp : 0,
@@ -123,8 +127,7 @@ export const mockApi: VerityAPI = {
     return delay(c, 400);
   },
 
-  async createClaim(text, signer: TypedDataSigner, _address) {
-    await signer.signTypedData({ kind: "ForwardRequest", op: "createClaim", text });
+  async createClaim(text, _signer, _address) {
     const existing = [...store.values()].find(
       (c) => c.text.trim().toLowerCase() === text.trim().toLowerCase(),
     );

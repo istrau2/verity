@@ -12,6 +12,12 @@ import { tokens } from "../shared/tokens";
  *   → 4. mount the shadow-DOM React overlay (launcher + hover card + panel).
  */
 async function boot() {
+  // Honor the popup on/off toggle.
+  const { enabled } = await chrome.storage.local.get("enabled");
+  if (enabled === false) {
+    console.log("[Verity] overlay disabled via popup");
+    return;
+  }
   console.log("[Verity] content script loaded on", location.href);
   // Mount the overlay unconditionally so the launcher is always a proof of
   // life, even if this page's markup yields no extractable sentences.

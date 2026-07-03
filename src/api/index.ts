@@ -1,17 +1,19 @@
 import type { VerityAPI } from "./contract";
 import { mockApi } from "./mock";
+import { httpApi } from "./http";
+import { env } from "../shared/env";
 
 /**
  * Adapter selection for claim/staking DATA (not validation).
  *
- * Today we ship the mock so the FE is demoable standalone. When the app
- * endpoints are wired, add `http.ts` implementing VerityAPI against
- * `env.appApiBase` and switch here.
+ *   VITE_API_MODE=http  → real app backend (reads live; writes still delegate
+ *                          to the mock until the wallet + relay land)
+ *   VITE_API_MODE=mock  → fully self-contained demo (default)
  *
  * Validation checks are NOT part of this adapter — see `api/checks.ts`
  * (moderation + dedup via app, atomicity via verity-api) and
  * `shared/claimChecks.ts` (local).
  */
-export const api: VerityAPI = mockApi;
+export const api: VerityAPI = env.apiMode === "http" ? httpApi : mockApi;
 
 export type { VerityAPI };
