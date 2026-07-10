@@ -1,8 +1,18 @@
 import type { TypedDataSigner } from "../api/contract";
-import type { WalletState } from "../shared/types";
+import type { WalletState, WriteMode } from "../shared/types";
 import { env } from "../shared/env";
 import { bgFetch } from "../api/bgFetch";
 import { providerRequest } from "./bridge";
+import { ensureCorrectChain } from "./network";
+
+/** Route writes based on balances (see WriteMode). */
+export function writeMode(s: WalletState): WriteMode {
+  if (!s.connected || !s.address) return "disconnected";
+  if (!s.balancesLoaded) return "loading";
+  if (!s.balance || s.balance <= 0) return "needs-vsp";
+  if ((s.avax ?? 0) >= env.minAvaxForGas) return "direct";
+  return "relay";
+}
 
 /**
  * Wallet abstraction.
@@ -19,12 +29,14 @@ import { providerRequest } from "./bridge";
 export interface Wallet extends TypedDataSigner {
   getState(): WalletState;
   connect(): Promise<WalletState>;
+  /** Silently restore a prior session (eth_accounts — never prompts). */
+  restore(): Promise<void>;
   disconnect(): Promise<void>;
   subscribe(cb: (s: WalletState) => void): () => void;
 }
 
 class InjectedWallet implements Wallet {
-  private state: WalletState = { connected: false, address: null, balance: null };
+  private state: WalletState = { connected: false, address: null, balance: null, avax: null, balancesLoaded: false };
   private subs = new Set<(s: WalletState) => void>();
 
   getState() {
@@ -35,15 +47,48 @@ class InjectedWallet implements Wallet {
     const accounts = await providerRequest<string[]>("eth_requestAccounts");
     const address = accounts?.[0] ?? null;
     if (!address) throw new Error("No account returned by the wallet.");
-    this.state = { connected: true, address, balance: null };
+    // Remember the session so page refreshes silently reconnect (restore()).
+    void chrome.storage.local.set({ walletConnected: true });
+    this.state = { connected: true, address, balance: null, avax: null, balancesLoaded: false };
     this.emit();
-    void this.refreshBalance(address);
+    // Get onto the right network before reading balances (AVAX is chain-scoped,
+    // and writeMode depends on it). If the user declines, the pre-write guard
+    // will re-prompt; we don't block connect.
+    try {
+      await ensureCorrectChain();
+    } catch {
+      /* proceed; balances may reflect the wrong chain until switched */
+    }
+    await this.refreshBalances(address);
     return this.state;
   }
 
+  /**
+   * Reconnect without prompting: eth_accounts returns the authorized address
+   * (or []) silently. Only runs if the user connected before and didn't
+   * explicitly disconnect. No chain-switch prompt here — the pre-write guard
+   * re-checks the network when it matters.
+   */
+  async restore(): Promise<void> {
+    try {
+      const { walletConnected } = await chrome.storage.local.get("walletConnected");
+      if (!walletConnected || this.state.connected) return;
+      const accounts = await providerRequest<string[]>("eth_accounts");
+      const address = accounts?.[0];
+      if (!address) return; // wallet locked or authorization revoked
+      this.state = { connected: true, address, balance: null, avax: null, balancesLoaded: false };
+      this.emit();
+      await this.refreshBalances(address);
+    } catch {
+      /* silent — the Connect button still works */
+    }
+  }
+
   async disconnect(): Promise<void> {
-    // Injected wallets have no programmatic disconnect; drop our local session.
-    this.state = { connected: false, address: null, balance: null };
+    // Injected wallets have no programmatic disconnect; drop our local session
+    // and stop auto-restoring until the user connects again.
+    void chrome.storage.local.remove("walletConnected");
+    this.state = { connected: false, address: null, balance: null, avax: null, balancesLoaded: false };
     this.emit();
   }
 
@@ -69,16 +114,21 @@ class InjectedWallet implements Wallet {
     for (const cb of this.subs) cb(this.state);
   }
 
-  private async refreshBalance(address: string) {
-    try {
-      const res = await bgFetch<{ balance?: string }>(`${env.appApiBase}/token/balance?address=${address}`);
-      if (res.json?.balance != null) {
-        this.state = { ...this.state, balance: Number(BigInt(res.json.balance)) / 1e18 };
-        this.emit();
-      }
-    } catch {
-      /* balance is best-effort */
-    }
+  private async refreshBalances(address: string) {
+    // VSP (via gateway) + native AVAX (via the injected provider) in parallel.
+    const [vsp, avaxHex] = await Promise.all([
+      bgFetch<{ balance?: string }>(`${env.appApiBase}/token/balance?address=${address}`)
+        .then((r) => r.json?.balance)
+        .catch(() => undefined),
+      providerRequest<string>("eth_getBalance", [address, "latest"]).catch(() => undefined),
+    ]);
+    this.state = {
+      ...this.state,
+      balance: vsp != null ? Number(BigInt(vsp)) / 1e18 : this.state.balance,
+      avax: avaxHex != null ? Number(BigInt(avaxHex)) / 1e18 : this.state.avax,
+      balancesLoaded: true,
+    };
+    this.emit();
   }
 }
 

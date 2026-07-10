@@ -23,7 +23,6 @@ export function injectMarkStyles() {
     .vr-mark--hover { background-color: rgba(79,70,229,0.12); border-radius: 2px; }
     .vr-mark--low { border-bottom-style: dashed; }
     .vr-mark--diverged { border-bottom-color: #d97706; border-bottom-style: dotted; }
-    .vr-mark--eligible { border-bottom: 1px dashed ${tokens.faint}; }
     .vr-badge {
       font: 600 10px ${tokens.font};
       vertical-align: super;
@@ -38,11 +37,20 @@ export function injectMarkStyles() {
   document.head.appendChild(style);
 }
 
+/**
+ * Only sentences whose claim exists ON-CHAIN get painted. "Eligible" groups
+ * (decomposed claims nobody has created yet) stay unmarked — underlining most
+ * of the article was noise; selecting text still routes to its claim group.
+ */
+function paintable(rec: SentenceRecord): boolean {
+  return rec.status === "mapped" || rec.status === "low-liquidity" || rec.status === "diverged";
+}
+
 /** Render marks for every renderable sentence record. */
 export function paint(recs: SentenceRecord[]) {
   for (const rec of recs) {
     records.set(rec.sentenceId, rec);
-    if (rec.status === "none") continue;
+    if (!paintable(rec)) continue;
     try {
       wrapRange(rec);
     } catch {
@@ -58,8 +66,6 @@ function classFor(rec: SentenceRecord): string {
       return "vr-mark vr-mark--low";
     case "diverged":
       return "vr-mark vr-mark--diverged";
-    case "eligible":
-      return "vr-mark vr-mark--eligible";
     default:
       return "vr-mark";
   }
@@ -112,14 +118,26 @@ function wrapRange(rec: SentenceRecord) {
   }
 }
 
-// Shade every fragment of the hovered sentence together (a claim can be split
-// into multiple marks around links, so CSS :hover alone isn't enough).
+/** All sentence ids that should light up together with `id` (its claim group). */
+function hoverSet(id: string): string[] {
+  const gid = records.get(id)?.groupId;
+  if (!gid) return [id];
+  const ids: string[] = [];
+  for (const [sid, r] of records) if (r.groupId === gid) ids.push(sid);
+  return ids.length ? ids : [id];
+}
+
+// Shade every fragment of the hovered claim together — a sentence can be split
+// into multiple marks around links, and a claim group can span multiple
+// sentences, so CSS :hover alone isn't enough.
 let hoverEls: Element[] = [];
 function setHover(id: string | null) {
   for (const el of hoverEls) el.classList.remove("vr-mark--hover");
   hoverEls = [];
   if (id) {
-    hoverEls = Array.from(document.querySelectorAll(`[${MARK_ATTR}="${cssEscape(id)}"]`));
+    for (const sid of hoverSet(id)) {
+      hoverEls.push(...Array.from(document.querySelectorAll(`[${MARK_ATTR}="${cssEscape(sid)}"]`)));
+    }
     for (const el of hoverEls) el.classList.add("vr-mark--hover");
   }
 }
@@ -139,11 +157,13 @@ function wireEvents() {
     const mark = (e.target as HTMLElement)?.closest?.(`[${MARK_ATTR}]`);
     if (!mark) return;
     const id = mark.getAttribute(MARK_ATTR)!;
-    // Keep the shade while moving between fragments of the same sentence.
+    // Keep the shade while moving between fragments/sentences of the same claim.
     const toMark = (e as MouseEvent).relatedTarget instanceof Element
       ? ((e as MouseEvent).relatedTarget as Element).closest(`[${MARK_ATTR}]`)
       : null;
-    if (!toMark || toMark.getAttribute(MARK_ATTR) !== id) {
+    const toId = toMark?.getAttribute(MARK_ATTR);
+    const sameGroup = toId != null && (toId === id || (records.get(toId)?.groupId != null && records.get(toId)?.groupId === records.get(id)?.groupId));
+    if (!sameGroup) {
       setHover(null);
       emit("hoverEnd", {});
     }
@@ -158,6 +178,46 @@ function wireEvents() {
     if (rec.status === "eligible") emit("create", { sentenceId: id, text: rec.text });
     else emit("open", { sentenceId: id });
   });
+}
+
+/** Remove any painted fragments for a sentence, restoring the raw text nodes. */
+function unwrapSentence(id: string) {
+  const frags = document.querySelectorAll(`[${MARK_ATTR}="${cssEscape(id)}"]`);
+  frags.forEach((frag) => {
+    // Drop any score badge, then unwrap the span back into a text node.
+    frag.querySelectorAll(".vr-badge").forEach((b) => b.remove());
+    const parent = frag.parentNode;
+    if (!parent) return;
+    parent.replaceChild(document.createTextNode(frag.textContent ?? ""), frag);
+    parent.normalize(); // merge adjacent text nodes so offsets stay contiguous
+  });
+}
+
+/**
+ * (Re)paint a single sentence after its record changes — e.g. a freshly created
+ * claim upgrading an "eligible"/selection sentence to a live underline. Safe to
+ * call whether or not the sentence was previously painted.
+ */
+export function repaintSentence(id: string) {
+  const rec = records.get(id);
+  if (!rec) return;
+  unwrapSentence(id);
+  if (!paintable(rec)) return; // unmark and stop (e.g. still just eligible)
+  try {
+    wrapRange(rec);
+  } catch {
+    /* awkward DOM boundaries — skip silently */
+  }
+}
+
+/** Repaint every sentence of a claim group (after create/stake). */
+export function repaintGroup(groupId: string) {
+  for (const [id, r] of records) {
+    // Skip synthetic selection records — they mirror a real sentence's range
+    // and painting them too would double-mark it.
+    if (id.startsWith("sel-")) continue;
+    if (r.groupId === groupId) repaintSentence(id);
+  }
 }
 
 /** Locate a sentence's rendered rect (for positioning overlay UI). */

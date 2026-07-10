@@ -31,7 +31,21 @@ window.addEventListener("message", async (event: MessageEvent) => {
     const result = await provider.request({ method: d.method!, params: d.params ?? [] });
     reply({ result });
   } catch (err) {
-    reply({ error: err instanceof Error ? err.message : String(err) });
+    const e = err as { code?: unknown; message?: unknown; data?: { message?: unknown } } | undefined;
+    const code = e && typeof e === "object" && "code" in e ? e.code : undefined;
+    // EIP-1193 errors are plain objects; pull the message out so it doesn't
+    // reach the UI as "[object Object]".
+    const message =
+      err instanceof Error
+        ? err.message
+        : typeof e?.message === "string"
+          ? e.message
+          : typeof e?.data?.message === "string"
+            ? e.data.message
+            : typeof err === "string"
+              ? err
+              : "Request failed";
+    reply({ error: message, code });
   }
 });
 

@@ -3,15 +3,12 @@ import type { Claim } from "../shared/types";
 import { bgFetch } from "./bgFetch";
 
 /**
- * Remote validation checks, split by source per the design:
- *   - atomicity/decomposition → verity-api (LLM)         [chain-independent]
- *   - moderation              → app  /api/moderate       [existing]
- *   - duplicate/near-duplicate → app /api/claims/check-* [existing]
- *
- * All requests go through the background service worker (bgFetch) so they
- * bypass page CORS/preflight. Every call fails *soft*: on error it returns
- * `{ ok: false }` so the validator shows "couldn't verify" rather than
- * blocking. No regex fallback for atomicity.
+ * Remote validation checks (hybrid transport):
+ *   - atomicity → verity-api gateway (holds the LLM key)
+ *   - moderation + dedup → the app directly (via the worker: CORS-safe + the
+ *     app sees the real user IP for its rate limiting)
+ * Every call fails *soft*: on error it returns `{ ok: false }` so the validator
+ * shows "couldn't verify" rather than blocking. No regex fallback for atomicity.
  */
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
@@ -44,7 +41,7 @@ export async function moderateClaim(
     headers: JSON_HEADERS,
     body: JSON.stringify({ text }),
   });
-  if (!res.ok || !res.json) return { ok: false, error: res.error ?? `app ${res.status}` };
+  if (!res.ok || !res.json) return { ok: false, error: res.error ?? `moderate ${res.status}` };
   const allowed = res.json.allowed !== false;
   // The app fails CLOSED when the moderation LLM is down (allowed=false +
   // "unavailable" reason). Treat that as a soft "couldn't verify" (warn), not a
@@ -63,38 +60,34 @@ export interface DedupResult {
 export async function findDuplicates(
   text: string,
 ): Promise<{ ok: true; result: DedupResult } | { ok: false; error: string }> {
-  const base = env.appApiBase;
+  // Direct to app: exact on-chain match + semantic near-matches, composed here.
   const q = encodeURIComponent(text);
-
-  const exact = await bgFetch<{ exists?: boolean; post_id?: number | null }>(
-    `${base}/claims/check-onchain?text=${q}`,
-  );
-  const sim = await bgFetch<{ matches?: { post_id: number; text: string; similarity: number }[] }>(
-    `${base}/claims/check-similar?text=${q}`,
-  );
-
-  // If both round-trips failed at the transport level, report soft failure.
+  const [exact, sim] = await Promise.all([
+    bgFetch<{ exists?: boolean; post_id?: number | null }>(`${env.appApiBase}/claims/check-onchain?text=${q}`),
+    bgFetch<{ matches?: { post_id: number; text: string; similarity: number }[] }>(
+      `${env.appApiBase}/claims/check-similar?text=${q}`,
+    ),
+  ]);
   if (!exact.ok && !sim.ok) return { ok: false, error: exact.error ?? sim.error ?? "dedup unavailable" };
 
   let duplicateOf: Claim | undefined;
   if (exact.json?.exists && exact.json.post_id != null) {
     duplicateOf = minimalClaim(exact.json.post_id, text);
   }
-
   const matches = sim.json?.matches ?? [];
   if (!duplicateOf && matches[0] && matches[0].similarity >= 0.95) {
     duplicateOf = minimalClaim(matches[0].post_id, matches[0].text);
   }
-
   const similar = matches
-    .filter((m) => !duplicateOf || m.post_id !== duplicateOf.postId)
+    .filter((m) => !duplicateOf || m.post_id !== duplicateOf!.postId)
     .slice(0, 3)
     .map((m) => ({ claim: minimalClaim(m.post_id, m.text), similarity: m.similarity }));
-
   return { ok: true, result: { duplicateOf, similar } };
 }
 
-/** A placeholder Claim from dedup data; full stats load when the panel opens it. */
+/** A placeholder Claim from dedup data; full stats load when the panel opens it.
+ *  `active: false` on purpose — claiming active without knowing painted solid
+ *  underlines for claims the real summary calls inactive (dashed). */
 function minimalClaim(postId: number, text: string): Claim {
   return {
     postId,
@@ -104,7 +97,7 @@ function minimalClaim(postId: number, text: string): Claim {
     supportStake: 0,
     challengeStake: 0,
     totalStake: 0,
-    active: true,
+    active: false,
     incomingCount: 0,
     outgoingCount: 0,
   };

@@ -6,9 +6,20 @@ export default defineManifest({
   version: "0.1.0",
   description:
     "Highlights stakeable factual claims on Wikipedia, shows their on-chain Verity Score, and lets you stake or create claims.",
+  icons: {
+    16: "icons/icon-16.png",
+    32: "icons/icon-32.png",
+    48: "icons/icon-48.png",
+    128: "icons/icon-128.png",
+  },
   action: {
     default_title: "Verity",
     default_popup: "src/popup/index.html",
+    default_icon: {
+      16: "icons/icon-16.png",
+      32: "icons/icon-32.png",
+      48: "icons/icon-48.png",
+    },
   },
   background: {
     service_worker: "src/background/service-worker.ts",
@@ -39,6 +50,13 @@ export default defineManifest({
     "https://verity-api.verisphere.example/*",
     "https://verisphere.co/api/*",
     "https://test.verisphere.co/api/*",
+    "https://api.avax-test.network/*",
+    "https://api.avax.network/*",
   ],
   permissions: ["storage", "activeTab"],
+  // The pill/panel <img> tags live in the page DOM, so the page must be
+  // allowed to load the icon from the extension origin.
+  web_accessible_resources: [
+    { resources: ["icons/*.png"], matches: ["*://*.wikipedia.org/*"] },
+  ],
 });

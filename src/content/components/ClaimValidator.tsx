@@ -1,11 +1,17 @@
 import { useEffect, useState } from "react";
 import { tokens } from "../../shared/tokens";
 import type { Claim } from "../../shared/types";
+import type { StakeSide } from "../store";
 import { api } from "../../api";
 import { runLocalChecks } from "../../shared/claimChecks";
 import { checkAtomicity, findDuplicates, moderateClaim } from "../../api/checks";
 import { useWallet } from "../../wallet/useWallet";
+import { writeMode } from "../../wallet/wallet";
+import { formatTxError } from "../../wallet/errors";
+import { useWriteStage, writeStageLabel } from "../../wallet/progress";
 import { VSChip } from "./VS";
+import { BuyVspCta } from "./BuyVspCta";
+import { Dots } from "./Dots";
 
 /**
  * The create-claim validation gate. Each check runs independently and resolves
@@ -29,17 +35,28 @@ interface RowState {
 const okRow: RowState = { status: "ok" };
 const loadingRow: RowState = { status: "loading" };
 
+const DEFAULT_STAKE = 10; // VSP seeded into the create-and-stake amount field
+
 export function ClaimValidator({
   initialText,
+  intentSide,
   onResolved,
 }: {
   initialText: string;
+  /** If present, the user came from the Support/Challenge pill: create + stake. */
+  intentSide?: StakeSide;
   onResolved: (claim: Claim) => void;
 }) {
-  const { connected, address, connect, signer } = useWallet();
+  const { connected, address, connect, signer, mode } = useWallet();
+  const writeStage = useWriteStage();
   const [text, setText] = useState(initialText);
   const [canonical, setCanonical] = useState(initialText);
   const [hasRun, setHasRun] = useState(false);
+
+  // Create-and-stake position (only shown when arriving via the pill).
+  const [side, setSide] = useState<StakeSide>(intentSide ?? "support");
+  const [stakeAmount, setStakeAmount] = useState(intentSide ? String(DEFAULT_STAKE) : "0");
+  const wantStake = !!intentSide;
 
   const [wellFormed, setWellFormed] = useState<RowState>(okRow);
   const [verifiable, setVerifiable] = useState<RowState>(okRow);
@@ -52,7 +69,7 @@ export function ClaimValidator({
   const [similar, setSimilar] = useState<{ claim: Claim; similarity: number }[]>([]);
 
   const [override, setOverride] = useState(false);
-  const [phase, setPhase] = useState<"idle" | "submitting">("idle");
+  const [phase, setPhase] = useState<"idle" | "connecting" | "creating" | "staking">("idle");
   const [err, setErr] = useState<string | null>(null);
 
   function runValidate(t: string) {
@@ -109,17 +126,65 @@ export function ClaimValidator({
     hasRun && !anyLoading && (verdict === "ok" || (verdict === "review" && override));
 
   async function submit() {
-    setPhase("submitting");
     setErr(null);
+    // Use the address connect() RETURNS — `address` is stale right after connect.
+    let addr = address;
+    if (!addr) {
+      setPhase("connecting");
+      let st;
+      try {
+        st = await connect();
+      } catch (e) {
+        setErr(formatTxError(e));
+        setPhase("idle");
+        return;
+      }
+      addr = st.address;
+      if (!addr) {
+        setErr("Connect your wallet to create.");
+        setPhase("idle");
+        return;
+      }
+      // Balances are loaded now; if there's no VSP, stop and let the Buy-VSP CTA render.
+      if (writeMode(st) === "needs-vsp") {
+        setPhase("idle");
+        return;
+      }
+    }
+    setPhase("creating");
     try {
-      // Use the address connect() RETURNS — `address` is stale right after connect.
-      let addr = address;
-      if (!addr) addr = (await connect()).address;
-      if (!addr) throw new Error("Connect your wallet to create.");
       const { claim } = await api.createClaim(canonical, signer, addr);
+      // Combined create-and-stake: if the user set a position and we have a real
+      // post id, apply the stake right after creating (second confirmation).
+      const amount = parseFloat(stakeAmount) || 0;
+      if (wantStake && amount > 0) {
+        if (claim.postId <= 0) {
+          // The claim is on-chain but we couldn't resolve its id yet — do NOT
+          // pretend the stake happened. Tell the user how to complete it.
+          setErr(
+            "Claim created, but it isn't indexed yet so your stake wasn't placed. " +
+              "Select the sentence again in a moment to stake on it.",
+          );
+          onResolved(claim);
+          return;
+        }
+        setPhase("staking");
+        const signed = side === "challenge" ? -amount : amount;
+        try {
+          const staked = await api.setStake(claim.postId, signed, signer, addr);
+          onResolved(staked);
+          return;
+        } catch (e) {
+          // The claim exists even if staking failed/was cancelled — surface it
+          // so the user lands on the claim and can retry staking there.
+          setErr(`Claim created, but staking failed: ${formatTxError(e)}`);
+          onResolved(claim);
+          return;
+        }
+      }
       onResolved(claim);
-    } catch (e: any) {
-      setErr(e?.message?.slice(0, 90) ?? "Create failed");
+    } catch (e) {
+      setErr(formatTxError(e));
       setPhase("idle");
     }
   }
@@ -174,38 +239,150 @@ export function ClaimValidator({
             onStakeExisting={onResolved}
           />
 
+          {wantStake && verdict !== "duplicate" && (
+            <StakePosition
+              side={side}
+              setSide={setSide}
+              amount={stakeAmount}
+              setAmount={setStakeAmount}
+            />
+          )}
+
           {err && <div style={{ marginTop: 8, fontSize: 12, color: tokens.challenge }}>{err}</div>}
 
-          {verdict !== "duplicate" && (
-            <button
-              onClick={submit}
-              disabled={!canSubmit || phase === "submitting"}
-              style={{
-                width: "100%",
-                marginTop: 12,
-                padding: "9px 14px",
-                borderRadius: 8,
-                border: "none",
-                background: canSubmit ? tokens.brand : tokens.line,
-                color: canSubmit ? "#fff" : tokens.faint,
-                fontWeight: 700,
-                fontSize: 13,
-                cursor: canSubmit ? "pointer" : "not-allowed",
-              }}
-            >
-              {phase === "submitting"
-                ? "Creating…"
-                : anyLoading
-                ? "Checking…"
-                : connected
-                ? "Create claim"
-                : "Connect & create"}
-            </button>
-          )}
+          {(() => {
+            const walletLoading = connected && mode === "loading";
+            const busy =
+              phase === "connecting" || phase === "creating" || phase === "staking" || walletLoading;
+            // Only reveal the Buy-VSP CTA once balances are known — never during
+            // the connect/loading window (avoids the flash).
+            const showBuyVsp = verdict !== "duplicate" && connected && mode === "needs-vsp";
+            if (showBuyVsp) {
+              return (
+                <div style={{ marginTop: 12 }}>
+                  <BuyVspCta action="create a claim" />
+                </div>
+              );
+            }
+            if (verdict === "duplicate") return null;
+            const enabled = canSubmit && !busy;
+            const amt = parseFloat(stakeAmount) || 0;
+            const idleLabel = !connected
+              ? "Connect & create"
+              : wantStake && amt > 0
+              ? `Create & ${side === "challenge" ? "challenge" : "support"} ${amt} VSP`
+              : "Create claim";
+            return (
+              <button
+                onClick={submit}
+                disabled={!enabled}
+                style={{
+                  width: "100%",
+                  marginTop: 12,
+                  padding: "9px 14px",
+                  borderRadius: 8,
+                  border: "none",
+                  background: enabled ? tokens.brand : tokens.line,
+                  color: enabled ? "#fff" : tokens.faint,
+                  fontWeight: 700,
+                  fontSize: 13,
+                  cursor: enabled ? "pointer" : "not-allowed",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  minHeight: 36,
+                }}
+              >
+                {phase === "creating" || phase === "staking" ? (
+                  writeStageLabel(writeStage) ?? (phase === "staking" ? "Staking…" : "Creating…")
+                ) : phase === "connecting" || walletLoading ? (
+                  <Dots />
+                ) : anyLoading ? (
+                  "Checking…"
+                ) : (
+                  idleLabel
+                )}
+              </button>
+            );
+          })()}
         </>
       )}
     </div>
   );
+}
+
+/** Create-and-stake position control: pick a side + amount before creating. */
+function StakePosition({
+  side,
+  setSide,
+  amount,
+  setAmount,
+}: {
+  side: StakeSide;
+  setSide: (s: StakeSide) => void;
+  amount: string;
+  setAmount: (a: string) => void;
+}) {
+  const amt = parseFloat(amount) || 0;
+  const accent = side === "challenge" ? tokens.challenge : tokens.support;
+  return (
+    <div style={{ marginTop: 12, border: `1px solid ${tokens.line}`, borderRadius: 8, padding: 10 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: tokens.ink, marginBottom: 8 }}>
+        Your opening position
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", borderRadius: 8, overflow: "hidden", border: `1px solid ${tokens.line}` }}>
+          <button
+            onClick={() => setSide("support")}
+            style={sideBtn(side === "support", tokens.support)}
+          >
+            ▲ Support
+          </button>
+          <button
+            onClick={() => setSide("challenge")}
+            style={sideBtn(side === "challenge", tokens.challenge)}
+          >
+            ▼ Challenge
+          </button>
+        </div>
+        <input
+          type="number"
+          min={0}
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          style={{
+            width: 72,
+            marginLeft: "auto",
+            padding: "6px 8px",
+            textAlign: "right",
+            fontSize: 14,
+            fontWeight: 700,
+            color: tokens.ink,
+            border: `1px solid ${tokens.line}`,
+            borderRadius: 8,
+          }}
+        />
+        <span style={{ fontSize: 12, fontWeight: 700, color: accent }}>VSP</span>
+      </div>
+      <div style={{ fontSize: 11, color: tokens.faint, marginTop: 6 }}>
+        {amt > 0
+          ? `You'll create the claim, then ${side === "challenge" ? "challenge" : "support"} it with ${amt} VSP (two confirmations).`
+          : "Set an amount to stake as you create, or leave 0 to just create."}
+      </div>
+    </div>
+  );
+}
+
+function sideBtn(active: boolean, color: string): React.CSSProperties {
+  return {
+    padding: "6px 12px",
+    border: "none",
+    background: active ? color : tokens.surface,
+    color: active ? "#fff" : tokens.muted,
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: "pointer",
+  };
 }
 
 function Row({ label, row }: { label: string; row: RowState }) {

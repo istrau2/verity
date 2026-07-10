@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { wallet } from "./wallet";
+import { wallet, writeMode } from "./wallet";
 
 /** React binding for the wallet singleton. */
 export function useWallet() {
@@ -9,6 +9,7 @@ export function useWallet() {
   );
   return {
     ...state,
+    mode: writeMode(state),
     connect: () => wallet.connect(),
     disconnect: () => wallet.disconnect(),
     signer: wallet,

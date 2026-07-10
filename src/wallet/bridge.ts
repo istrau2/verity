@@ -16,13 +16,18 @@ function ensureListener() {
   listening = true;
   window.addEventListener("message", (event: MessageEvent) => {
     if (event.source !== window) return;
-    const d = event.data as { __verity?: boolean; dir?: string; id?: number; result?: unknown; error?: string };
+    const d = event.data as { __verity?: boolean; dir?: string; id?: number; result?: unknown; error?: string; code?: unknown };
     if (!d || d.__verity !== true || d.dir !== "res" || d.id == null) return;
     const p = pending.get(d.id);
     if (!p) return;
     pending.delete(d.id);
-    if (d.error) p.reject(new Error(d.error));
-    else p.resolve(d.result);
+    if (d.error) {
+      const e = new Error(d.error) as Error & { code?: unknown };
+      e.code = d.code; // preserve EIP-1193 error code (e.g. 4902 unknown chain)
+      p.reject(e);
+    } else {
+      p.resolve(d.result);
+    }
   });
 }
 

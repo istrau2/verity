@@ -1,24 +1,29 @@
 import type {
+  ArticleResolveRequest,
+  ArticleResolveResult,
   Claim,
   Edge,
-  ResolveRequest,
-  ResolveResponse,
   UserStake,
 } from "../shared/types";
 
 /**
- * VerityAPI — the contract for the Verisphere `app` backend (claim data, staking
- * relay). Most methods map onto endpoints that already exist in the app README
- * (`/api/claims/*`, `/relay`, `/token/balance`); `resolveSentences` is the one
- * genuinely new endpoint Verity needs (batch Wikipedia sentence → claim).
+ * VerityAPI — the contract for Verity's backends. Claim reads/writes map onto
+ * the app's endpoints (`/api/claims/*`, `/relay`, `/token/balance`);
+ * `resolveArticle` is the verity-api gateway's canonical decomposition
+ * (article → claim groups + fluff, matched on-chain).
  *
  * NOTE: claim *validation* checks do not live here — they are split by source
  * (local heuristics, app moderation/dedup, and the verity-api atomicity service)
  * and orchestrated in `api/checks.ts` + `shared/claimChecks.ts`.
  */
 export interface VerityAPI {
-  /** Batch-resolve a page's sentences to claims (semantic dedup on the server). */
-  resolveSentences(req: ResolveRequest): Promise<ResolveResponse>;
+  /**
+   * Decompose a batch of paragraphs into canonical claim groups and resolve
+   * them against the chain (verity-api: LLM decomposition + match-batch +
+   * summaries). Called lazily as paragraphs scroll into view; groups merge
+   * across batches by content-hash groupId.
+   */
+  resolveArticle(req: ArticleResolveRequest): Promise<ArticleResolveResult>;
 
   /** Full claim detail for the side panel. */
   getClaim(postId: number): Promise<Claim>;

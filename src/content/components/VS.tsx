@@ -27,13 +27,14 @@ export function VSChip({ evs, active = true }: { evs?: number; active?: boolean 
 
 /** The horizontal Verity Score bar (−100 … +100), ported from the web app. */
 export function VSBar({ evs }: { evs?: number }) {
-  const value = evs ?? 0;
+  const rated = evs !== undefined && !Number.isNaN(evs);
+  const value = rated ? (evs as number) : 0;
   const pct = ((value + 100) / 200) * 100;
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: tokens.muted, marginBottom: 4 }}>
         <span>challenged</span>
-        <span style={{ fontWeight: 700, color: tokens.ink }}>eVS {value.toFixed(0)}</span>
+        {!rated && <span style={{ fontWeight: 700, color: tokens.faint }}>unrated</span>}
         <span>supported</span>
       </div>
       <div style={{ height: 8, background: "linear-gradient(90deg,#dc2626,#ffffff,#16a34a)", borderRadius: 999, position: "relative" }}>

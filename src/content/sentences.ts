@@ -9,8 +9,13 @@ import type { SentenceRecord } from "./store";
  * "citation needed" / "disputed" marker (our priority create/stake targets).
  */
 
-const MAX_SENTENCES = 140; // keep first-paint work bounded on long articles
-const SENTENCE_SPLIT = /(?<=[.!?])\s+(?=[A-Z0-9"“(])/;
+// With lazy per-paragraph analysis there's no per-request cost to extracting
+// the whole article; this is just a safety cap for pathological pages.
+const MAX_SENTENCES = 1500;
+// Sentence boundary: .!? optionally followed by citation markers like [56]
+// (without tolerating those, "coverage.[56] Between" never splits and two
+// sentences travel as one), then whitespace before a capital/quote/paren.
+const SENTENCE_SPLIT = /(?<=[.!?](?:\[[^\]]*\])*)\s+(?=[A-Z0-9"“(])/;
 
 export function extractSentences(): Omit<SentenceRecord, "status">[] {
   // Try progressively broader selectors — Wikipedia skins (Vector 2022,

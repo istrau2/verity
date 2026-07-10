@@ -1,17 +1,18 @@
-import type { VerityAPI, TypedDataSigner } from "./contract";
-import type { Claim, Edge, ResolveRequest, ResolveResponse, SentenceMatch, UserStake } from "../shared/types";
+import type { VerityAPI } from "./contract";
+import type { ArticleResolveRequest, ArticleResolveResult, Claim, ClaimGroup, Edge, UserStake } from "../shared/types";
 import { env } from "../shared/env";
 import { bgFetch } from "./bgFetch";
-import { mockApi } from "./mock";
+import { writeCreateClaim, writeSetStake } from "../wallet/writer";
 
 /**
- * Real backend adapter. READS hit the Verisphere `app` (via the background
- * worker, so CORS/preflight is bypassed). WRITES (setStake/createClaim) are
- * temporarily delegated to the mock until the WalletConnect signer + relay flow
- * land — see TODO.md §1.
+ * Real backend adapter (hybrid transport, all via the background worker):
+ *   - resolveArticle → verity-api gateway (LLM decomposition + on-chain matching)
+ *   - claim reads → the app directly (passthrough; preserves the app's per-IP limits)
+ *   - writes → wallet/writer (direct-submit or gasless relay by wallet mode)
  */
 
-const base = env.appApiBase;
+const gw = env.verityApiUrl;
+const appBase = env.appApiBase;
 
 /** Map the app's snake_case claim summary → the extension's Claim. */
 function toClaim(j: any): Claim {
@@ -30,31 +31,42 @@ function toClaim(j: any): Claim {
 }
 
 export const httpApi: VerityAPI = {
-  async resolveSentences(req: ResolveRequest): Promise<ResolveResponse> {
-    const res = await bgFetch<{ matches: any[] }>(`${base}/claims/resolve`, {
+  async resolveArticle(req: ArticleResolveRequest): Promise<ArticleResolveResult> {
+    const res = await bgFetch<{ groups?: any[]; fluff?: string[]; error?: string }>(`${gw}/article/claims`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
     });
-    if (!res.ok || !res.json) return { matches: [] }; // graceful: no underlines
-    const matches: SentenceMatch[] = res.json.matches.map((m) => ({
-      sentenceId: m.sentence_id,
-      text: m.text,
-      status: m.status,
-      matchScore: m.match_score,
-      claim: m.claim ? toClaim(m.claim) : undefined,
+    if (!res.ok || !res.json) {
+      throw new Error(res.json?.error ?? res.error ?? `resolve ${res.status}`);
+    }
+    const groups: ClaimGroup[] = (res.json.groups ?? []).map((g) => ({
+      groupId: g.group_id,
+      canonicalText: g.canonical_text ?? "",
+      sentenceIds: g.sentence_ids ?? [],
+      status: g.status,
+      matchScore: g.match_score,
+      claim: g.claim ? toClaim(g.claim) : undefined,
     }));
-    return { matches };
+    return { groups, fluff: res.json.fluff ?? [] };
   },
 
   async getClaim(postId: number): Promise<Claim> {
-    const res = await bgFetch<any>(`${base}/claims/${postId}/summary`);
+    const res = await bgFetch<any>(`${appBase}/claims/${postId}/summary`);
     if (!res.ok || !res.json) throw new Error(res.error ?? `getClaim ${res.status}`);
-    return toClaim(res.json);
+    const claim = toClaim(res.json);
+    // The app indexer lags the chain by minutes. When it reports an unstaked
+    // claim, double-check the live on-chain totals so a just-staked claim
+    // doesn't render as "nothing staked".
+    if (claim.totalStake === 0) {
+      const live = await liveTotals(postId);
+      if (live && live.total > 0) applyLive(claim, live);
+    }
+    return claim;
   },
 
   async getEdges(postId: number): Promise<{ incoming: Edge[]; outgoing: Edge[] }> {
-    const res = await bgFetch<{ incoming: any[]; outgoing: any[] }>(`${base}/claims/${postId}/edges`);
+    const res = await bgFetch<{ incoming: any[]; outgoing: any[] }>(`${appBase}/claims/${postId}/edges`);
     if (!res.ok || !res.json) return { incoming: [], outgoing: [] };
     const map = (e: any): Edge => ({
       linkPostId: e.link_post_id,
@@ -68,7 +80,7 @@ export const httpApi: VerityAPI = {
 
   async getUserStake(postId: number, address: string): Promise<UserStake> {
     const res = await bgFetch<{ user_support?: number; user_challenge?: number }>(
-      `${base}/claims/${postId}/user-stake?user=${address}`,
+      `${appBase}/claims/${postId}/user-stake?user=${address}`,
     );
     return {
       postId,
@@ -77,12 +89,96 @@ export const httpApi: VerityAPI = {
     };
   },
 
-  // Writes need EIP-712 signing via a real wallet + the relay flow (TODO.md §1).
-  // Delegated to the mock for now so the create/stake UX still demos.
-  setStake(postId: number, targetVsp: number, signer: TypedDataSigner, address: string) {
-    return mockApi.setStake(postId, targetVsp, signer, address);
+  async setStake(postId: number, targetVsp: number): Promise<Claim> {
+    await writeSetStake(postId, targetVsp);
+    // Stake amounts come from the CHAIN (source of truth, reflects the tx we
+    // just confirmed); score/edges come from the app summary and lag until the
+    // indexer catches up — that's honest, scoring genuinely hasn't run yet.
+    const [claim, live] = await Promise.all([
+      httpApi.getClaim(postId).catch(() => minimalClaim(postId, "")),
+      liveTotals(postId),
+    ]);
+    if (live) applyLive(claim, live);
+    return claim;
   },
-  createClaim(text: string, signer: TypedDataSigner, address: string) {
-    return mockApi.createClaim(text, signer, address);
+
+  async createClaim(text: string): Promise<{ claim: Claim; deduped: boolean }> {
+    const { postId, deduped } = await writeCreateClaim(text);
+    let pid = postId;
+    // Direct-path creates don't learn the post id from the tx — resolve it by
+    // exact text. RETRY briefly: the create-and-stake flow depends on this id,
+    // and a single missed lookup used to silently skip the stake.
+    for (let i = 0; pid == null && i < 5; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 1500));
+      const chk = await bgFetch<{ exists?: boolean; post_id?: number | null }>(
+        `${appBase}/claims/check-onchain?text=${encodeURIComponent(text)}`,
+      );
+      if (chk.json?.post_id != null) pid = chk.json.post_id;
+    }
+    if (pid != null) {
+      // Fire-and-forget: seed the gateway's match cache so this claim's
+      // underline shows on the next page load for everyone — otherwise a
+      // cached "no match" verdict + embedding-indexer lag hide it for minutes.
+      void bgFetch(`${gw}/claim-created`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      try {
+        return { claim: await httpApi.getClaim(pid), deduped };
+      } catch {
+        /* not indexed yet */
+      }
+    }
+    // Freshly created but not yet indexed — show the text with neutral stats.
+    return { claim: minimalClaim(pid ?? -1, text), deduped };
   },
 };
+
+interface LiveTotals {
+  support: number;
+  challenge: number;
+  total: number;
+  active: boolean;
+  baseVs: number | null;
+  effectiveVs: number | null;
+}
+
+/** Live contract state via the gateway's RPC (never lags the app's indexer). */
+async function liveTotals(postId: number): Promise<LiveTotals | null> {
+  if (postId < 0) return null;
+  const res = await bgFetch<{
+    support_vsp?: number;
+    challenge_vsp?: number;
+    active?: boolean;
+    base_vs?: number | null;
+    effective_vs?: number | null;
+  }>(`${gw}/claims/${postId}/live`);
+  if (!res.ok || !res.json) return null;
+  const support = res.json.support_vsp ?? 0;
+  const challenge = res.json.challenge_vsp ?? 0;
+  return {
+    support,
+    challenge,
+    total: support + challenge,
+    active: !!res.json.active,
+    baseVs: res.json.base_vs ?? null,
+    effectiveVs: res.json.effective_vs ?? null,
+  };
+}
+
+function applyLive(claim: Claim, live: LiveTotals) {
+  claim.supportStake = live.support;
+  claim.challengeStake = live.challenge;
+  claim.totalStake = live.total;
+  claim.active = live.active;
+  if (live.baseVs != null) claim.baseVs = live.baseVs;
+  if (live.effectiveVs != null) claim.evs = live.effectiveVs;
+}
+
+function minimalClaim(postId: number, text: string): Claim {
+  return {
+    postId, text, evs: 0, baseVs: 0, supportStake: 0, challengeStake: 0,
+    totalStake: 0, active: false, incomingCount: 0, outgoingCount: 0,
+  };
+}

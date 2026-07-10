@@ -4,46 +4,94 @@ import { fmtVsp } from "../../shared/format";
 import type { Claim } from "../../shared/types";
 import { api } from "../../api";
 import { useWallet } from "../../wallet/useWallet";
+import { writeMode } from "../../wallet/wallet";
+import { formatTxError } from "../../wallet/errors";
+import { useWriteStage, writeStageLabel } from "../../wallet/progress";
+import { BuyVspCta } from "./BuyVspCta";
+import { Dots } from "./Dots";
 
 /**
  * Target-based stake control mirroring frontend/src/components/StakeControl.tsx:
  * the user sets a net position (positive = support, negative = challenge) and we
  * call setStake once. Writes go through the relay (wallet only signs).
  */
-export function StakeWidget({ claim, onUpdated }: { claim: Claim; onUpdated: (c: Claim) => void }) {
-  const { connected, address, balance, connect, signer } = useWallet();
-  const [target, setTarget] = useState("0");
-  const [busy, setBusy] = useState(false);
+export function StakeWidget({
+  claim,
+  initialSide,
+  onUpdated,
+}: {
+  claim: Claim;
+  /** Seeds the position sign when the user arrived via the Support/Challenge pill. */
+  initialSide?: "support" | "challenge";
+  onUpdated: (c: Claim) => void;
+}) {
+  const { connected, address, balance, connect, signer, mode } = useWallet();
+  const writeStage = useWriteStage();
+  const [target, setTarget] = useState(initialSide === "challenge" ? "-10" : initialSide === "support" ? "10" : "0");
+  const [phase, setPhase] = useState<"idle" | "connecting" | "submitting">("idle");
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     if (!connected || !address) return;
     api.getUserStake(claim.postId, address).then((s) => {
-      setTarget((s.userSupport - s.userChallenge).toFixed(2));
+      const net = s.userSupport - s.userChallenge;
+      // An existing position wins over the pill-seeded default.
+      if (net !== 0) setTarget(net.toFixed(2));
     });
   }, [connected, address, claim.postId]);
 
   const targetVal = parseFloat(target) || 0;
   const side = targetVal > 0 ? "support" : targetVal < 0 ? "challenge" : "none";
   const sideColor = targetVal > 0 ? tokens.support : targetVal < 0 ? tokens.challenge : tokens.muted;
+  const walletLoading = connected && mode === "loading";
+  const busy = phase !== "idle" || walletLoading;
 
   async function apply() {
-    if (busy) return;
-    setBusy(true);
+    if (phase !== "idle") return;
     setErr(null);
+    // Use the address connect() RETURNS — the `address` closure var is stale
+    // right after connecting (state updates don't update locals).
+    let addr = address;
+    if (!addr) {
+      setPhase("connecting");
+      let st;
+      try {
+        st = await connect();
+      } catch (e) {
+        setErr(formatTxError(e));
+        setPhase("idle");
+        return;
+      }
+      addr = st.address;
+      if (!addr) {
+        setErr("Connect your wallet to stake.");
+        setPhase("idle");
+        return;
+      }
+      // Balances loaded; if there's no VSP, stop — the Buy-VSP CTA now renders.
+      if (writeMode(st) === "needs-vsp") {
+        setPhase("idle");
+        return;
+      }
+    }
+    setPhase("submitting");
     try {
-      // Use the address connect() RETURNS — the `address` closure var is stale
-      // right after connecting (state updates don't update locals).
-      let addr = address;
-      if (!addr) addr = (await connect()).address;
-      if (!addr) throw new Error("Connect your wallet to stake.");
       const updated = await api.setStake(claim.postId, targetVal, signer, addr);
       onUpdated(updated);
-    } catch (e: any) {
-      setErr(e?.message?.slice(0, 90) ?? "Stake failed");
+    } catch (e) {
+      setErr(formatTxError(e));
     } finally {
-      setBusy(false);
+      setPhase("idle");
     }
+  }
+
+  if (connected && mode === "needs-vsp") {
+    return (
+      <div style={{ border: `1px solid ${tokens.line}`, borderRadius: 10, padding: 12 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: tokens.ink, marginBottom: 8 }}>Your position</div>
+        <BuyVspCta action="stake" />
+      </div>
+    );
   }
 
   return (
@@ -69,7 +117,15 @@ export function StakeWidget({ claim, onUpdated }: { claim: Claim; onUpdated: (c:
         <button onClick={() => setTarget((targetVal + 1).toFixed(2))} style={stepBtn}>+</button>
         <span style={{ fontSize: 12, fontWeight: 700, color: sideColor, minWidth: 74 }}>VSP · {side}</span>
         <button onClick={apply} disabled={busy} style={{ ...applyBtn, opacity: busy ? 0.6 : 1 }}>
-          {busy ? "…" : connected ? "Apply" : "Connect & stake"}
+          {phase === "submitting" ? (
+            writeStageLabel(writeStage) ?? "…"
+          ) : phase === "connecting" || walletLoading ? (
+            <Dots />
+          ) : connected ? (
+            "Apply"
+          ) : (
+            "Connect & stake"
+          )}
         </button>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: tokens.faint, marginTop: 8 }}>

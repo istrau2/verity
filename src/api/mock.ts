@@ -1,10 +1,10 @@
 import type { VerityAPI } from "./contract";
 import type {
+  ArticleResolveRequest,
+  ArticleResolveResult,
   Claim,
+  ClaimGroup,
   Edge,
-  ResolveRequest,
-  ResolveResponse,
-  SentenceMatch,
   UserStake,
 } from "../shared/types";
 
@@ -50,33 +50,39 @@ function delay<T>(v: T, ms = 180): Promise<T> {
 }
 
 export const mockApi: VerityAPI = {
-  async resolveSentences(req: ResolveRequest): Promise<ResolveResponse> {
-    const matches: SentenceMatch[] = req.sentences.map((s) => {
+  async resolveArticle(req: ArticleResolveRequest): Promise<ArticleResolveResult> {
+    // Deterministic demo decomposition: rule-matched sentences become on-chain
+    // groups, ~1 in 6 become "eligible" groups (canonical = the sentence), the
+    // rest are fluff. Sentences sharing the same first-8-words merge into one
+    // group so the multi-sentence group UX is demoable.
+    const groups = new Map<string, ClaimGroup>();
+    const fluff: string[] = [];
+    const sentences = req.paragraphs.flatMap((p) => p.sentences);
+    for (const s of sentences) {
       const rule = RULES.find((r) => r.re.test(s.text));
-      if (rule) {
-        const active = rule.active !== false;
-        const claim = makeClaim(s.text, rule.evs, active);
-        return {
-          sentenceId: s.sentenceId,
-          text: s.text,
-          status: active ? "mapped" : "low-liquidity",
-          claim,
-          matchScore: 0.92,
-          flagged: s.flagged,
+      const eligible = !rule && hash(s.sentenceId) % 6 === 0 && s.text.length > 60;
+      if (!rule && !eligible) {
+        fluff.push(s.sentenceId);
+        continue;
+      }
+      const norm = s.text.toLowerCase().split(/\s+/).slice(0, 8).join(" ");
+      let group = groups.get(norm);
+      if (!group) {
+        const active = rule ? rule.active !== false : false;
+        group = {
+          // Content-derived id (like the server's) so groups merge across batches.
+          groupId: `mock-g${hash(norm)}`,
+          canonicalText: s.text,
+          sentenceIds: [],
+          status: rule ? (active ? "mapped" : "low-liquidity") : "eligible",
+          matchScore: rule ? 0.92 : undefined,
+          claim: rule ? makeClaim(s.text, rule.evs, rule.active !== false) : undefined,
         };
+        groups.set(norm, group);
       }
-      if (s.flagged) {
-        return { sentenceId: s.sentenceId, text: s.text, status: "eligible", flagged: true };
-      }
-      // Make ~1 in 6 unmatched sentences "eligible" to seed create-flow demos.
-      const eligible = hash(s.sentenceId) % 6 === 0 && s.text.length > 60;
-      return {
-        sentenceId: s.sentenceId,
-        text: s.text,
-        status: eligible ? "eligible" : "none",
-      };
-    });
-    return delay({ matches });
+      group.sentenceIds.push(s.sentenceId);
+    }
+    return delay({ groups: [...groups.values()], fluff }, 600);
   },
 
   async getClaim(postId) {

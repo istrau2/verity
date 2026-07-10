@@ -62,17 +62,48 @@ export interface SentenceMatch {
   matchScore?: number;
   /** True if the source paragraph carried a [citation needed]/disputed tag. */
   flagged?: boolean;
+  /** Claim group this sentence belongs to (canonical decomposition). */
+  groupId?: string;
+  /** The group's canonical claim text (minimal logical form, self-contained). */
+  canonicalText?: string;
 }
 
-/** Payload sent to resolve a page's sentences in one batch. */
-export interface ResolveRequest {
+/**
+ * A canonical claim extracted from the article, plus the sentences expressing
+ * it. This is the unit the UI paints, stakes, and creates against.
+ */
+export interface ClaimGroup {
+  groupId: string;
+  canonicalText: string;
+  /** Page sentence ids (article order) that express this claim. */
+  sentenceIds: string[];
+  /** "mapped" | "low-liquidity" (on-chain) or "eligible" (not yet created). */
+  status: Extract<SentenceStatus, "mapped" | "low-liquidity" | "eligible">;
+  matchScore?: number;
+  claim?: Claim;
+}
+
+/** One paragraph of the page — the lazy-loading + server-cache unit. */
+export interface ParagraphInput {
+  paragraphId: string;
+  /** Preceding sentences (context for pronoun resolution, not analyzed). */
+  context?: string[];
+  sentences: { sentenceId: string; text: string }[];
+}
+
+/** Payload to decompose+resolve a batch of paragraphs (sent as they scroll into view). */
+export interface ArticleResolveRequest {
   url: string;
   title: string;
-  sentences: { sentenceId: string; text: string; flagged?: boolean }[];
+  /** Wikipedia revision id — pins the article text for caching. */
+  revisionId?: string | null;
+  paragraphs: ParagraphInput[];
 }
 
-export interface ResolveResponse {
-  matches: SentenceMatch[];
+export interface ArticleResolveResult {
+  groups: ClaimGroup[];
+  /** Sentence ids that carry no checkable claim. */
+  fluff: string[];
 }
 
 /** Wallet connection state exposed to the UI. */
@@ -80,7 +111,19 @@ export interface WalletState {
   connected: boolean;
   address: string | null;
   balance: number | null; // VSP, human units
+  avax: number | null; // native AVAX, human units
+  balancesLoaded: boolean; // false between connect and the first balance fetch
 }
+
+/**
+ * How on-chain writes should be routed, derived from balances:
+ *  - "loading"   → connected but balances not fetched yet (transient)
+ *  - "needs-vsp" → no VSP; show a buy-VSP call to action
+ *  - "direct"    → has VSP + AVAX; submit txs directly (user pays gas)
+ *  - "relay"     → has VSP but no AVAX; gasless meta-tx via the relay
+ *  - "disconnected"
+ */
+export type WriteMode = "disconnected" | "loading" | "needs-vsp" | "direct" | "relay";
 
 // ── Claim validation (the create-flow gate) ─────────────────────────────
 

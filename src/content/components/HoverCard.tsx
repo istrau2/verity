@@ -33,9 +33,11 @@ export function HoverCard({ rec, rect, panelOpen = false }: { rec: SentenceRecor
       {rec.status === "eligible" ? (
         <div>
           <div style={{ fontSize: 12, fontWeight: 700, color: tokens.brand, marginBottom: 6 }}>
-            No claim yet
+            Not staked yet
           </div>
-          <div style={{ fontSize: 13, color: tokens.ink, lineHeight: 1.45 }}>{rec.text}</div>
+          <div style={{ fontSize: 13, color: tokens.ink, lineHeight: 1.45 }}>
+            {rec.canonicalText ?? rec.text}
+          </div>
           <div style={{ fontSize: 12, color: tokens.muted, marginTop: 8 }}>
             Click to create this claim and stake on it.
           </div>

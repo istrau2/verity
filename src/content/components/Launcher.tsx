@@ -1,14 +1,26 @@
 import { tokens } from "../../shared/tokens";
+import { Dots } from "./Dots";
 
-/** Floating brand launcher, bottom-right. Shows how many claims were found. */
-export function Launcher({ count, active, onClick }: { count: number; active: boolean; onClick: () => void }) {
+/**
+ * Floating brand launcher, bottom-right. Shows the page's claim count, plus a
+ * small pulsing-dots indicator while paragraphs are being analyzed.
+ */
+export function Launcher({
+  count,
+  loading,
+  onClick,
+}: {
+  count: number;
+  loading: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
       onClick={onClick}
       style={{
         position: "fixed",
         bottom: 20,
-        right: active ? 396 : 20,
+        right: 20,
         display: "flex",
         alignItems: "center",
         gap: 8,
@@ -25,13 +37,18 @@ export function Launcher({ count, active, onClick }: { count: number; active: bo
         transition: "right 0.18s ease",
       }}
     >
-      <span style={{ width: 16, height: 16, borderRadius: 5, background: "#fff", opacity: 0.9 }} />
+      <img
+        src={chrome.runtime.getURL("icons/icon-32.png")}
+        alt=""
+        style={{ width: 18, height: 18, borderRadius: 5 }}
+      />
       Verity
       {count > 0 && (
         <span style={{ background: "rgba(255,255,255,0.25)", borderRadius: 999, padding: "1px 8px", fontSize: 12 }}>
           {count}
         </span>
       )}
+      {loading && <Dots />}
     </button>
   );
 }

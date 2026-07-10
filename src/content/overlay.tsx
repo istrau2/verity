@@ -1,23 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { on, records } from "./store";
+import { on, records, groups, createIntents, pageStatus, hooks, type StakeSide, type SentenceRecord } from "./store";
 import { markRect } from "./highlighter";
 import { HoverCard } from "./components/HoverCard";
 import { SidePanel } from "./components/SidePanel";
 import { Launcher } from "./components/Launcher";
-import { expandToSentences } from "./sentenceSelection";
+import { expandToSentenceRange } from "./sentenceSelection";
 import { tokens } from "../shared/tokens";
+import type { ClaimGroup } from "../shared/types";
+
+interface SelPos {
+  el: HTMLElement;
+  start: number;
+  end: number;
+}
 
 /** Root React app living in the shadow root: launcher + hover card + panel. */
 export function Overlay() {
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [panelId, setPanelId] = useState<string | null>(null);
-  const [, force] = useState(0);
+  const [tick, force] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
-  const [sel, setSel] = useState<{ text: string; rect: DOMRect } | null>(null);
+  // `text` is the sentence-snapped claim text; `raw` is the user's literal
+  // selection — kept because it disambiguates WHICH claim of a multi-claim
+  // sentence they meant.
+  const [sel, setSel] = useState<{ text: string; raw: string; rect: DOMRect; pos: SelPos | null } | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Snapshot the selected text at mousedown so a selection-clear between
-  // mousedown and click on the button can't drop it.
-  const pendingText = useRef<string | null>(null);
+  // Snapshot the selection at mousedown so a selection-clear between mousedown
+  // and click on the pill can't drop it.
+  const pending = useRef<{ text: string; raw: string; pos: SelPos | null } | null>(null);
 
   useEffect(() => {
     const offs = [
@@ -57,7 +67,7 @@ export function Overlay() {
   // straight into the create view seeded with that text (as if you'd clicked
   // the floating button).
   useEffect(() => {
-    const qualify = (): { text: string; rect: DOMRect } | null => {
+    const qualify = (): { text: string; raw: string; rect: DOMRect; pos: SelPos | null } | null => {
       const s = window.getSelection();
       if (!s || s.isCollapsed || s.rangeCount === 0) return null;
       const raw = s.toString().replace(/\s+/g, " ").trim();
@@ -65,16 +75,18 @@ export function Overlay() {
       // Ignore selections inside our own overlay (e.g. the validator textarea).
       const host = document.getElementById("verity-root");
       if (raw.length < 8 || !anchor || (host && host.contains(anchor))) return null;
-      // Snap the selection out to whole sentences for the claim text.
-      const text = expandToSentences(s) ?? raw;
+      // Snap the selection out to whole sentences for the claim text + position.
+      const exp = expandToSentenceRange(s);
+      const text = exp?.text ?? raw;
+      const pos = exp ? { el: exp.el, start: exp.start, end: exp.end } : null;
       let rect = s.getRangeAt(0).getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) {
         const el = anchor.nodeType === 1 ? (anchor as Element) : anchor.parentElement;
         if (el) rect = el.getBoundingClientRect();
       }
-      return { text, rect };
+      return { text, raw, rect, pos };
     };
-    const onChange = () => setSel(panelId ? null : qualify());
+    const onChange = () => setSel(qualify());
     const onFinalize = (e: Event) => {
       // Ignore interactions inside our own UI (e.g. clicking Connect / buttons
       // in the side panel) — otherwise a leftover page selection would spawn a
@@ -83,8 +95,7 @@ export function Overlay() {
       if (host && e.target && host.contains(e.target as Node)) return;
       const q = qualify();
       if (!q) return;
-      if (panelId) openCreate(q.text); // panel open → go straight to create view
-      else setSel(q); // no panel → show the floating button
+      setSel(q); // show the Support/Challenge pill next to the selection
     };
     document.addEventListener("selectionchange", onChange);
     document.addEventListener("mouseup", onFinalize);
@@ -96,89 +107,216 @@ export function Overlay() {
     };
   }, [panelId]);
 
-  function openCreate(text: string) {
+  /**
+   * The user picked Support/Challenge on a selection. If the selection touches
+   * a claim-bearing sentence (even partially), route to that claim's group —
+   * stake view when it's on-chain, create view seeded with the canonical text
+   * otherwise. A sentence can express several claims; the user's RAW selection
+   * (which clause they highlighted) picks the right one. Pure-fluff selections
+   * open the create view with a notice.
+   */
+  async function onPickSide(side: StakeSide, text: string, raw: string, pos: SelPos | null) {
     if (!text) return;
+    pending.current = null;
+    setSel(null);
+
+    // Route through a synthetic record carrying the CHOSEN group's identity
+    // (a shared sentence record can only point at one of its claims).
+    const routeGroup = (group: ClaimGroup, base: SentenceRecord) => {
+      const id = `sel-${Date.now()}`;
+      records.set(id, {
+        sentenceId: id,
+        text: base.text,
+        status: group.status,
+        claim: group.claim,
+        matchScore: group.matchScore,
+        groupId: group.groupId,
+        canonicalText: group.canonicalText,
+        el: base.el,
+        start: base.start,
+        end: base.end,
+      });
+      createIntents.set(id, side);
+      setPanelId(id);
+    };
+
+    // A chooser record: the selection touched several claims, so the panel
+    // displays them all and the user picks (best selection-affinity first).
+    const routeChooser = (candidates: ClaimGroup[], base: SentenceRecord) => {
+      const id = `sel-${Date.now()}`;
+      records.set(id, {
+        sentenceId: id,
+        text,
+        status: "eligible",
+        choices: candidates.map((g) => g.groupId),
+        el: base.el,
+        start: base.start,
+        end: base.end,
+      });
+      createIntents.set(id, side);
+      setPanelId(id);
+    };
+
+    /** Every claim group touched by the selection (across all its sentences). */
+    const resolveCandidates = (): { candidates: ClaimGroup[]; base: SentenceRecord } | null => {
+      if (!pos) return null;
+      // Sentences the selection overlaps (partially counts).
+      const overlapped: SentenceRecord[] = [];
+      let base: SentenceRecord | null = null;
+      let bestOverlap = 0;
+      for (const [id, r] of records) {
+        if (id.startsWith("sel-") || !r.groupId || r.el !== pos.el) continue;
+        const overlap = Math.min(r.end, pos.end) - Math.max(r.start, pos.start);
+        if (overlap <= 0) continue;
+        overlapped.push(r);
+        if (overlap > bestOverlap) {
+          base = r;
+          bestOverlap = overlap;
+        }
+      }
+      if (!base) return null;
+      const ids = new Set(overlapped.map((r) => r.sentenceId));
+      const candidates = [...groups.values()].filter((g) => g.sentenceIds.some((sid) => ids.has(sid)));
+      candidates.sort((a, b) => selectionAffinity(raw, b.canonicalText) - selectionAffinity(raw, a.canonicalText));
+      return candidates.length > 0 ? { candidates, base } : null;
+    };
+
+    let resolved = resolveCandidates();
+    if (resolved) {
+      return resolved.candidates.length === 1
+        ? routeGroup(resolved.candidates[0], resolved.base)
+        : routeChooser(resolved.candidates, resolved.base);
+    }
+
+    // Nothing analyzed here yet? Ask the lazy loader for just this paragraph,
+    // then retry the claim lookup (the "aerosols" case: selection ahead of the
+    // viewport loop or in a failed batch).
+    if (pos && !rangeWasAnalyzed(pos) && hooks.analyzeParagraph) {
+      toastMsg("Analyzing this paragraph…");
+      try {
+        await hooks.analyzeParagraph(pos.el);
+      } catch {
+        /* fall through to the plain create flow */
+      }
+      resolved = resolveCandidates();
+      if (resolved) {
+        return resolved.candidates.length === 1
+          ? routeGroup(resolved.candidates[0], resolved.base)
+          : routeChooser(resolved.candidates, resolved.base);
+      }
+    }
+
+    // Still no claim. Show the "no checkable claim" notice ONLY when this text
+    // was actually analyzed and judged fluff — text the analyzer never saw
+    // (lists/tables, analysis failures) gets the plain create flow and the
+    // validator judges it.
+    const analyzed = pos ? rangeWasAnalyzed(pos) : false;
     const id = `sel-${Date.now()}`;
     records.set(id, {
       sentenceId: id,
       text,
       status: "eligible",
-      el: document.body,
-      start: 0,
-      end: 0,
+      fluffNotice: analyzed,
+      // Keep the DOM position so the new claim can be underlined in place.
+      el: pos?.el ?? document.body,
+      start: pos?.start ?? 0,
+      end: pos?.end ?? 0,
     });
-    pendingText.current = null;
-    setSel(null);
-    // Leave the user's selection highlighted on the page for context — don't
-    // clear it (clearing was jarring and lost the visual reference).
+    createIntents.set(id, side);
     setPanelId(id);
   }
 
   const stats = useMemo(() => {
-    let mapped = 0;
-    let firstId: string | null = null;
+    const groupIds = new Set<string>();
     for (const [id, r] of records) {
       if (r.status === "mapped" || r.status === "low-liquidity" || r.status === "diverged") {
-        mapped++;
-        if (!firstId) firstId = id;
+        groupIds.add(r.groupId ?? id);
       }
     }
-    return { mapped, firstId };
-    // recompute when panel toggles or page becomes ready
-  }, [panelId, hoverId, toast]);
+    return { mapped: groupIds.size };
+    // recompute when the page resolves (tick) or UI state changes
+  }, [panelId, hoverId, toast, tick]);
 
   const hoverRec = hoverId ? records.get(hoverId) : null;
   const hoverRect = hoverId ? markRect(hoverId) : null;
 
   return (
     <>
-      <Launcher
-        count={stats.mapped}
-        active={!!panelId}
-        onClick={() => {
-          if (panelId) setPanelId(null);
-          else if (stats.firstId) setPanelId(stats.firstId);
-          else
-            document.dispatchEvent(
-              new CustomEvent("verity:toast", {
-                detail: { msg: "No claims here yet — select any sentence to create one." },
-              }),
-            );
-        }}
-      />
+      {!panelId && (
+        <Launcher
+          count={stats.mapped}
+          loading={pageStatus.loading}
+          onClick={() => {
+            // Open a list of every claim found on the page so far.
+            const onChain = [...groups.values()].filter((g) => g.status !== "eligible");
+            if (onChain.length === 0) {
+              toastMsg(
+                pageStatus.loading
+                  ? "Still analyzing this article — one moment…"
+                  : pageStatus.error
+                  ? `Analysis failed: ${pageStatus.error}`
+                  : "No claims here yet — select any sentence to create one.",
+              );
+              return;
+            }
+            const id = `sel-${Date.now()}`;
+            records.set(id, {
+              sentenceId: id,
+              text: "",
+              status: "eligible",
+              choices: onChain.map((g) => g.groupId),
+              listAll: true,
+              el: document.body,
+              start: 0,
+              end: 0,
+            });
+            setPanelId(id);
+          }}
+        />
+      )}
 
       {hoverRec && hoverRect && (
         <HoverCard rec={hoverRec} rect={hoverRect} panelOpen={!!panelId} />
       )}
 
-      {sel && !panelId && (
-        <button
+      {sel && (
+        <div
           onMouseDown={(e) => {
             e.preventDefault(); /* keep the selection alive */
-            pendingText.current = sel.text;
+            pending.current = { text: sel.text, raw: sel.raw, pos: sel.pos };
           }}
-          onClick={() => openCreate(pendingText.current ?? sel?.text ?? "")}
           style={{
             position: "fixed",
-            top: Math.max(8, sel.rect.top - 42),
-            left: Math.min(sel.rect.left, window.innerWidth - 170),
+            top: Math.max(8, sel.rect.top - 44),
+            left: Math.min(sel.rect.left, window.innerWidth - 230),
             display: "flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "7px 12px",
+            alignItems: "stretch",
             borderRadius: 999,
-            border: "none",
-            background: `linear-gradient(90deg, ${tokens.brand}, ${tokens.brandInk})`,
-            color: "#fff",
-            fontWeight: 700,
-            fontSize: 13,
+            overflow: "hidden",
             boxShadow: tokens.shadow,
-            cursor: "pointer",
             zIndex: tokens.z,
+            font: `700 13px ${tokens.font}`,
           }}
         >
-          + Create claim
-        </button>
+          <button
+            onClick={() => {
+              const p = pending.current ?? { text: sel.text, raw: sel.raw, pos: sel.pos };
+              onPickSide("support", p.text, p.raw, p.pos);
+            }}
+            style={pillHalf(tokens.support, "left")}
+          >
+            ▲ Support
+          </button>
+          <button
+            onClick={() => {
+              const p = pending.current ?? { text: sel.text, raw: sel.raw, pos: sel.pos };
+              onPickSide("challenge", p.text, p.raw, p.pos);
+            }}
+            style={pillHalf(tokens.challenge, "right")}
+          >
+            ▼ Challenge
+          </button>
+        </div>
       )}
 
       {panelId && (
@@ -205,4 +343,57 @@ export function Overlay() {
       )}
     </>
   );
+}
+
+function toastMsg(msg: string) {
+  document.dispatchEvent(new CustomEvent("verity:toast", { detail: { msg } }));
+}
+
+/**
+ * How well a canonical claim matches what the user literally highlighted:
+ * the fraction of the claim's tokens present in the selection. Selecting the
+ * methane clause of "While methane lasts 12 years, CO2 lasts longer" scores
+ * the methane claim above the CO2 one.
+ */
+function selectionAffinity(selection: string, canonical: string): number {
+  const selTokens = new Set(tokenize(selection));
+  const canonTokens = tokenize(canonical);
+  if (selTokens.size === 0 || canonTokens.length === 0) return 0;
+  let hits = 0;
+  for (const t of canonTokens) if (selTokens.has(t)) hits++;
+  return hits / canonTokens.length;
+}
+
+function tokenize(s: string): string[] {
+  return (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((t) => t.length >= 2);
+}
+
+/**
+ * True if the selected range overlaps any analyzed sentence (claim or fluff).
+ * False means the decomposition never saw this text — e.g. past the extraction
+ * cap on very long articles, or in lists/tables the extractor skips.
+ */
+function rangeWasAnalyzed(pos: { el: HTMLElement; start: number; end: number }): boolean {
+  for (const [id, r] of records) {
+    if (id.startsWith("sel-") || r.el !== pos.el) continue; // ad-hoc selections don't count
+    if (Math.min(r.end, pos.end) - Math.max(r.start, pos.start) > 0) return true;
+  }
+  return false;
+}
+
+/** One half of the split selection pill (green Support / red Challenge). */
+function pillHalf(bg: string, side: "left" | "right"): React.CSSProperties {
+  return {
+    display: "flex",
+    alignItems: "center",
+    gap: 5,
+    padding: "8px 14px",
+    border: "none",
+    background: bg,
+    color: "#fff",
+    fontWeight: 700,
+    fontSize: 13,
+    cursor: "pointer",
+    borderRight: side === "left" ? "1px solid rgba(255,255,255,0.35)" : "none",
+  };
 }

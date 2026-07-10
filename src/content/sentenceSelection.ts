@@ -17,18 +17,28 @@ const FWD_BOUNDARY = new RegExp(`[.!?]${TRAILERS}(?=\\s|$)`, "g");
 
 const MAX_EXPANDED = 800; // safety cap; beyond this fall back to the raw selection
 
-export function expandToSentences(sel: Selection): string | null {
+/** Snapped-sentence text plus its position in the DOM (for painting a mark). */
+export interface ExpandedSelection {
+  text: string;
+  el: HTMLElement;
+  /** Char offsets of the snapped sentence within `el`'s raw textContent. */
+  start: number;
+  end: number;
+}
+
+/** Snap a selection to sentence boundaries, returning text + DOM position. */
+export function expandToSentenceRange(sel: Selection): ExpandedSelection | null {
   if (!sel.rangeCount) return null;
   const range = sel.getRangeAt(0);
 
   // Find a stable block element to use as sentence context.
-  let node: Node | null = range.commonAncestorContainer;
+  const node: Node | null = range.commonAncestorContainer;
   const el = node.nodeType === 3 ? node.parentElement : (node as Element);
   if (!el) return null;
   const block =
     (el.closest?.(
       "p, li, dd, dt, td, th, blockquote, figcaption, h1, h2, h3, h4, h5, h6",
-    ) as Element | null) ?? el;
+    ) as HTMLElement | null) ?? (el as HTMLElement);
 
   const full = block.textContent ?? "";
   if (!full) return null;
@@ -66,5 +76,11 @@ export function expandToSentences(sel: Selection): string | null {
     .replace(/\[[^\]]*\]/g, "") // strip [1], [citation needed]
     .replace(/\s+/g, " ")
     .trim();
-  return text || null;
+  if (!text) return null;
+  return { text, el: block, start, end };
+}
+
+/** Text-only convenience wrapper. */
+export function expandToSentences(sel: Selection): string | null {
+  return expandToSentenceRange(sel)?.text ?? null;
 }

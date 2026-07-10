@@ -32,12 +32,23 @@ chrome.runtime.onMessage.addListener((msg: VrFetchMsg, _sender, sendResponse) =>
   if (msg?.type !== "vr-fetch") return; // not ours
 
   (async () => {
+    // Cap every proxied request so a hung/slow backend can't leave the UI
+    // spinning forever (e.g. a "Creating…" button that never resolves).
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 30_000);
     try {
-      const res = await fetch(msg.url, msg.init);
+      const res = await fetch(msg.url, { ...msg.init, signal: ctrl.signal });
       const body = await res.text();
       sendResponse({ ok: res.ok, status: res.status, body } satisfies VrFetchResp);
     } catch (e) {
-      sendResponse({ ok: false, status: 0, error: e instanceof Error ? e.message : String(e) } satisfies VrFetchResp);
+      const aborted = e instanceof Error && e.name === "AbortError";
+      sendResponse({
+        ok: false,
+        status: 0,
+        error: aborted ? "Request timed out" : e instanceof Error ? e.message : String(e),
+      } satisfies VrFetchResp);
+    } finally {
+      clearTimeout(timer);
     }
   })();
 
