@@ -27,7 +27,7 @@ export function Launcher({
         padding: "10px 14px",
         borderRadius: 999,
         border: "none",
-        background: `linear-gradient(90deg, ${tokens.brand}, ${tokens.brandInk})`,
+        background: `linear-gradient(90deg, ${tokens.brandInk}, ${tokens.brand})`,
         color: "#fff",
         fontWeight: 700,
         fontSize: 13,

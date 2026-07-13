@@ -313,7 +313,8 @@ const header: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   padding: "12px 14px",
-  background: `linear-gradient(90deg, ${tokens.brand}, ${tokens.brandInk})`,
+  // Dark end sits under the (indigo) icon so it stands out against the header.
+  background: `linear-gradient(90deg, ${tokens.brandInk}, ${tokens.brand})`,
 };
 const logoImg: React.CSSProperties = { width: 20, height: 20, borderRadius: 6 };
 const walletPill: React.CSSProperties = {
